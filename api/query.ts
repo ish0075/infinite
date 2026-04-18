@@ -135,35 +135,47 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
         systemPrompt += ' The vault is currently offline. Answer from general knowledge, noting the limitation.';
       }
 
-      // ─── Step 3: Stream LLM ───
-      const resolvedProvider = provider || 'openai';
-      const apiKey = resolvedProvider === 'groq' ? GROQ_KEY : OPENAI_KEY;
-      const baseURL = resolvedProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
-      const model = resolvedProvider === 'groq' ? 'llama-3.1-8b-instant' : 'gpt-4o-mini';
+      // ─── Step 3: Stream LLM with fallback chain ───
+      type ProviderConfig = { key: string | undefined; baseURL: string; model: string; name: string };
+      const providers: ProviderConfig[] = [
+        { key: OPENAI_KEY, baseURL: 'https://api.openai.com/v1', model: 'gpt-4o-mini', name: 'openai' },
+        { key: GROQ_KEY, baseURL: 'https://api.groq.com/openai/v1', model: 'llama-3.1-8b-instant', name: 'groq' },
+      ];
 
-      if (!apiKey) {
-        sendSSE(res, { type: 'error', message: 'No LLM provider configured' });
-        res.end();
-        return;
+      // Respect explicit provider preference
+      const preferred = providers.find((p) => p.name === provider);
+      const attemptOrder = preferred ? [preferred, ...providers.filter((p) => p !== preferred)] : providers;
+
+      let llmRes: Response | null = null;
+      let usedProvider = '';
+
+      for (const p of attemptOrder) {
+        if (!p.key) continue;
+        const res = await fetch(`${p.baseURL}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${p.key}` },
+          body: JSON.stringify({
+            model: p.model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: text },
+            ],
+            temperature: 0.7,
+            max_tokens: 1024,
+            stream: true,
+          }),
+        });
+        if (res.ok) {
+          llmRes = res;
+          usedProvider = p.name;
+          break;
+        }
+        // Log fallback attempt for debugging
+        console.warn(`[API /query] ${p.name} failed with ${res.status}, trying next...`);
       }
 
-      const llmRes = await fetch(`${baseURL}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: text },
-          ],
-          temperature: 0.7,
-          max_tokens: 1024,
-          stream: true,
-        }),
-      });
-
-      if (!llmRes.ok) {
-        sendSSE(res, { type: 'error', message: `LLM error: ${llmRes.status}` });
+      if (!llmRes) {
+        sendSSE(res, { type: 'error', message: 'All LLM providers unavailable. Check API keys and quotas.' });
         res.end();
         return;
       }
@@ -207,7 +219,8 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
       }
 
       // ─── Step 4: Done ───
-      sendSSE(res, { type: 'done', metadata: { provider: resolvedProvider, model, ragDegraded, contextChunks: chunks.length } });
+      const usedModel = usedProvider === 'groq' ? 'llama-3.1-8b-instant' : 'gpt-4o-mini';
+      sendSSE(res, { type: 'done', metadata: { provider: usedProvider, model: usedModel, ragDegraded, contextChunks: chunks.length } });
       res.end();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
