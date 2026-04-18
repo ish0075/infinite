@@ -1,5 +1,4 @@
-// ─── API: LLM Router (Server-Side) ───
-// Routes queries to the appropriate provider using secure server-side keys.
+// ─── API: LLM Router (Server-Side, fetch-based) ───
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { checkRateLimit, getRateLimitHeaders } from './utils/rateLimit';
@@ -9,7 +8,6 @@ const MODELS: Record<string, string> = {
   openai: 'gpt-4o-mini',
   groq: 'llama-3.1-8b-instant',
   kimi: 'moonshot-v1-8k',
-  ollama: 'llama3.2',
 };
 
 const API_KEYS: Record<string, string | undefined> = {
@@ -18,10 +16,10 @@ const API_KEYS: Record<string, string | undefined> = {
   kimi: process.env.KIMI_API_KEY,
 };
 
-const BASE_URLS: Record<string, string | undefined> = {
+const BASE_URLS: Record<string, string> = {
+  openai: 'https://api.openai.com/v1',
   groq: 'https://api.groq.com/openai/v1',
   kimi: 'https://api.moonshot.cn/v1',
-  ollama: 'http://localhost:11434/v1',
 };
 
 function getClientIP(req: VercelRequest): string {
@@ -31,8 +29,43 @@ function getClientIP(req: VercelRequest): string {
   return req.socket?.remoteAddress || 'unknown';
 }
 
+async function callProvider(
+  provider: string,
+  messages: any[],
+  temperature: number,
+  maxTokens: number
+): Promise<{ text: string; model: string; usage?: any }> {
+  const apiKey = API_KEYS[provider];
+  if (!apiKey) throw new Error(`No API key for ${provider}`);
+
+  const url = `${BASE_URLS[provider]}/chat/completions`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: MODELS[provider],
+      messages,
+      temperature,
+      max_tokens: maxTokens,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`${provider} API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  return {
+    text: data.choices[0]?.message?.content || '',
+    model: MODELS[provider],
+    usage: data.usage,
+  };
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -48,8 +81,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const ip = getClientIP(req);
-
-  // Rate limiting
   const rateLimit = checkRateLimit(ip);
   const headers = getRateLimitHeaders(ip);
   Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
@@ -67,17 +98,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return;
     }
 
-    // Decide provider
     const resolvedProvider = provider || decideProvider(messages);
-    const apiKey = API_KEYS[resolvedProvider];
-    const baseURL = BASE_URLS[resolvedProvider];
 
-    if (!apiKey && resolvedProvider !== 'ollama') {
-      res.status(500).json({ error: `Provider ${resolvedProvider} not configured` });
-      return;
-    }
-
-    // Cache key: hash of messages + provider
+    // Cache key
     const cacheKey = `llm:${resolvedProvider}:${JSON.stringify(messages)}`;
     const cached = getCached(cacheKey);
     if (cached) {
@@ -85,69 +108,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return;
     }
 
-    // Call provider
-    const url = baseURL ? `${baseURL}/chat/completions` : 'https://api.openai.com/v1/chat/completions';
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: MODELS[resolvedProvider],
-        messages,
-        temperature,
-        max_tokens: maxTokens,
-      }),
-    });
-
-    if (!response.ok) {
-      // Fallback to default provider
+    // Try primary provider
+    let result;
+    try {
+      result = await callProvider(resolvedProvider, messages, temperature, maxTokens);
+    } catch (primaryErr) {
+      // Fallback to openai
       const fallback = 'openai';
       if (resolvedProvider !== fallback && API_KEYS[fallback]) {
-        const fallbackResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${API_KEYS[fallback]}`,
-          },
-          body: JSON.stringify({
-            model: MODELS[fallback],
-            messages,
-            temperature,
-            max_tokens: maxTokens,
-          }),
-        });
-
-        if (!fallbackResponse.ok) {
-          throw new Error(`LLM failed: ${fallbackResponse.status} ${fallbackResponse.statusText}`);
-        }
-
-        const data = await fallbackResponse.json();
-        const result = {
-          text: data.choices[0]?.message?.content || '',
-          provider: fallback,
-          model: MODELS[fallback],
-          usage: data.usage,
-        };
-        setCached(cacheKey, result);
-        res.status(200).json(result);
-        return;
+        console.warn(`[LLM] ${resolvedProvider} failed, falling back to ${fallback}`);
+        result = await callProvider(fallback, messages, temperature, maxTokens);
+      } else {
+        throw primaryErr;
       }
-
-      throw new Error(`LLM failed: ${response.status} ${response.statusText}`);
     }
 
-    const data = await response.json();
-    const result = {
-      text: data.choices[0]?.message?.content || '',
-      provider: resolvedProvider,
-      model: MODELS[resolvedProvider],
-      usage: data.usage,
-    };
-
-    setCached(cacheKey, result);
-    res.status(200).json(result);
+    const response = { text: result.text, provider: resolvedProvider, model: result.model, usage: result.usage };
+    setCached(cacheKey, response);
+    res.status(200).json(response);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     console.error('[API /llm]', message);
@@ -163,12 +141,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 function decideProvider(messages: any[]): string {
   const userMsg = messages.find((m) => m.role === 'user')?.content || '';
   const lower = userMsg.toLowerCase();
-
   const simplePatterns = [/^hi\b/, /^hello\b/, /^hey\b/, /^status/, /^help\b/];
   if (simplePatterns.some((p) => p.test(lower))) return 'groq';
-
-  const reasoningPatterns = [/analyze/, /compare/, /evaluate/, /recommend/, /why\s+is/, /how\s+does/];
-  if (reasoningPatterns.some((p) => p.test(lower))) return 'openai';
-
   return 'openai';
 }

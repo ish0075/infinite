@@ -1,5 +1,4 @@
-// ─── API: Combined Query (RAG + LLM in one call) ───
-// The full cognitive pipeline: embed → search Qdrant → augment prompt → LLM.
+// ─── API: Combined Query (RAG + LLM, fetch-based) ───
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { checkRateLimit, getRateLimitHeaders } from './utils/rateLimit';
@@ -22,36 +21,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (req.method === 'OPTIONS') {
-    res.status(200).end();
-    return;
-  }
-
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method not allowed' });
-    return;
-  }
+  if (req.method === 'OPTIONS') { res.status(200).end(); return; }
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
 
   const ip = getClientIP(req);
   const rateLimit = checkRateLimit(ip);
-  const headers = getRateLimitHeaders(ip);
-  Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
-
-  if (!rateLimit.allowed) {
-    res.status(429).json({ error: 'Rate limit exceeded' });
-    return;
-  }
+  Object.entries(getRateLimitHeaders(ip)).forEach(([k, v]) => res.setHeader(k, v));
+  if (!rateLimit.allowed) { res.status(429).json({ error: 'Rate limit exceeded' }); return; }
 
   const startTime = Date.now();
 
   try {
     const { text, provider } = req.body;
-    if (!text) {
-      res.status(400).json({ error: 'Query text required' });
-      return;
-    }
+    if (!text) { res.status(400).json({ error: 'Query text required' }); return; }
 
-    // Cache key
+    // Cache
     const cacheKey = `query:${text}`;
     const cached = getCached(cacheKey);
     if (cached) {
@@ -65,75 +49,49 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (OPENAI_KEY) {
       try {
-        const embedResponse = await fetch('https://api.openai.com/v1/embeddings', {
+        const embedRes = await fetch('https://api.openai.com/v1/embeddings', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${OPENAI_KEY}`,
-          },
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
           body: JSON.stringify({ input: text, model: 'text-embedding-3-small' }),
         });
 
-        if (embedResponse.ok) {
-          const embedData = await embedResponse.json();
+        if (embedRes.ok) {
+          const embedData = await embedRes.json();
           const vector = embedData.data[0].embedding;
 
-          const qdrantResponse = await fetch(
-            `${QDRANT_URL}/collections/${QDRANT_COLLECTION}/points/search`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ vector, limit: 5, with_payload: true, with_vector: false, score_threshold: 0.7 }),
-            }
-          );
+          const qdrantRes = await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}/points/search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ vector, limit: 5, with_payload: true, with_vector: false, score_threshold: 0.7 }),
+          });
 
-          if (qdrantResponse.ok) {
-            const data = await qdrantResponse.json();
+          if (qdrantRes.ok) {
+            const data = await qdrantRes.json();
             chunks = data.result.map((point: any) => ({
               id: point.id,
               content: point.payload?.content || '',
-              metadata: {
-                filePath: point.payload?.file_path || '',
-                title: point.payload?.title || 'Untitled',
-                tags: point.payload?.tags || [],
-              },
+              metadata: { filePath: point.payload?.file_path || '', title: point.payload?.title || 'Untitled', tags: point.payload?.tags || [] },
               score: point.score,
             }));
-          } else {
-            ragDegraded = true;
-          }
-        } else {
-          ragDegraded = true;
-        }
-      } catch {
-        ragDegraded = true;
-      }
-    } else {
-      ragDegraded = true;
-    }
+          } else { ragDegraded = true; }
+        } else { ragDegraded = true; }
+      } catch { ragDegraded = true; }
+    } else { ragDegraded = true; }
 
-    // ─── Step 2: Build augmented prompt ───
-    let systemPrompt =
-      'You are I.N.F.I.N.I.T.E., the intelligence core of the BigDataClaw ecosystem. ' +
-      'You assist with real estate data, client profiles, legal precedents, and deal analysis.';
+    // ─── Step 2: Build prompt ───
+    let systemPrompt = 'You are I.N.F.I.N.I.T.E., the intelligence core of the BigDataClaw ecosystem. You assist with real estate data, client profiles, legal precedents, and deal analysis.';
 
     if (chunks.length > 0) {
-      const contextBlock = chunks
-        .map((c, i) => `[${i + 1}] ${c.metadata.title}\n${c.content}`)
-        .join('\n\n');
-      systemPrompt +=
-        ' The following documents were retrieved from the user\'s vault as relevant context. ' +
-        'Base your answer primarily on these documents.\n\n=== CONTEXT ===\n' + contextBlock;
+      const ctx = chunks.map((c, i) => `[${i + 1}] ${c.metadata.title}\n${c.content}`).join('\n\n');
+      systemPrompt += ` Base your answer on these vault documents:\n\n${ctx}`;
     } else if (ragDegraded) {
-      systemPrompt +=
-        ' The knowledge retrieval system is currently offline. Answer to the best of your general knowledge, ' +
-        'but note that you do not have access to the user\'s vault data for this query.';
+      systemPrompt += ' The vault is currently offline. Answer from general knowledge, noting the limitation.';
     }
 
     // ─── Step 3: LLM ───
     const resolvedProvider = provider || 'openai';
     const apiKey = resolvedProvider === 'groq' ? GROQ_KEY : OPENAI_KEY;
-    const baseURL = resolvedProvider === 'groq' ? 'https://api.groq.com/openai/v1' : undefined;
+    const baseURL = resolvedProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
     const model = resolvedProvider === 'groq' ? 'llama-3.1-8b-instant' : 'gpt-4o-mini';
 
     if (!apiKey) {
@@ -141,13 +99,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return;
     }
 
-    const url = baseURL ? `${baseURL}/chat/completions` : 'https://api.openai.com/v1/chat/completions';
-    const llmResponse = await fetch(url, {
+    const llmRes = await fetch(`${baseURL}/chat/completions`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
         model,
         messages: [
@@ -159,11 +113,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }),
     });
 
-    if (!llmResponse.ok) {
-      throw new Error(`LLM failed: ${llmResponse.status}`);
-    }
+    if (!llmRes.ok) throw new Error(`LLM error: ${llmRes.status}`);
 
-    const data = await llmResponse.json();
+    const data = await llmRes.json();
     const result = {
       text: data.choices[0]?.message?.content || '',
       provider: resolvedProvider,
