@@ -118,8 +118,8 @@ function AppInner() {
         )}
       </GenesisContainer>
 
-      {/* Dashboard UI layers */}
-      {isActive && <Dashboard audioDataRef={audioDataRef} />}
+      {/* Dashboard UI layers — always render, audio is optional */}
+      <Dashboard audioDataRef={audioDataRef} />
 
       {/* Awakening overlay */}
       {!isActive && (
