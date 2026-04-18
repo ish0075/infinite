@@ -331,7 +331,6 @@ export default function SingularityLayer({ scrollProgress, audioDataRef, onConve
           }}
           vertexShader={/* glsl */ `
             attribute float size;
-            attribute vec3 color;
             varying vec3 vColor;
             varying float vDist;
             void main() {
