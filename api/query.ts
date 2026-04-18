@@ -1,9 +1,51 @@
-// ─── API: Combined Query (RAG + LLM, fetch-based) ───
+// ─── API: Combined Query (RAG + LLM, Self-Contained) ───
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { checkRateLimit, getRateLimitHeaders } from './_rateLimit';
-import { getCached, setCached } from './_cache';
 
+// ─── Inlined Rate Limiting ───
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT = 10;
+const RATE_WINDOW_MS = 60 * 1000;
+
+function checkRateLimit(ip: string) {
+  const now = Date.now();
+  const entry = rateLimitMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    return { allowed: true };
+  }
+  if (entry.count >= RATE_LIMIT) return { allowed: false };
+  entry.count++;
+  return { allowed: true };
+}
+
+function getRateLimitHeaders(ip: string) {
+  const entry = rateLimitMap.get(ip);
+  const remaining = entry ? Math.max(0, RATE_LIMIT - entry.count) : RATE_LIMIT;
+  return { 'X-RateLimit-Limit': String(RATE_LIMIT), 'X-RateLimit-Remaining': String(remaining) };
+}
+
+// ─── Inlined Cache ───
+const cache = new Map<string, { value: any; expiresAt: number }>();
+const MAX_CACHE_SIZE = 100;
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+function getCached<T>(key: string): T | null {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) { cache.delete(key); return null; }
+  return entry.value;
+}
+
+function setCached<T>(key: string, value: T, ttlMs: number = CACHE_TTL_MS): void {
+  if (cache.size >= MAX_CACHE_SIZE) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey) cache.delete(firstKey);
+  }
+  cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+}
+
+// ─── Config ───
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const QDRANT_COLLECTION = process.env.QDRANT_COLLECTION || 'obsidian_vault';
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
@@ -25,9 +67,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
 
   const ip = getClientIP(req);
-  const rateLimit = checkRateLimit(ip);
+  if (!checkRateLimit(ip).allowed) { res.status(429).json({ error: 'Rate limit exceeded' }); return; }
   Object.entries(getRateLimitHeaders(ip)).forEach(([k, v]) => res.setHeader(k, v));
-  if (!rateLimit.allowed) { res.status(429).json({ error: 'Rate limit exceeded' }); return; }
 
   const startTime = Date.now();
 
@@ -35,13 +76,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const { text, provider } = req.body;
     if (!text) { res.status(400).json({ error: 'Query text required' }); return; }
 
-    // Cache
     const cacheKey = `query:${text}`;
     const cached = getCached(cacheKey);
-    if (cached) {
-      res.status(200).json({ ...cached, cached: true, latencyMs: Date.now() - startTime });
-      return;
-    }
+    if (cached) { res.status(200).json({ ...cached, cached: true, latencyMs: Date.now() - startTime }); return; }
 
     // ─── Step 1: RAG ───
     let chunks: any[] = [];
@@ -58,13 +95,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (embedRes.ok) {
           const embedData = await embedRes.json();
           const vector = embedData.data[0].embedding;
-
           const qdrantRes = await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}/points/search`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ vector, limit: 5, with_payload: true, with_vector: false, score_threshold: 0.7 }),
           });
-
           if (qdrantRes.ok) {
             const data = await qdrantRes.json();
             chunks = data.result.map((point: any) => ({
@@ -80,7 +115,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ─── Step 2: Build prompt ───
     let systemPrompt = 'You are I.N.F.I.N.I.T.E., the intelligence core of the BigDataClaw ecosystem. You assist with real estate data, client profiles, legal precedents, and deal analysis.';
-
     if (chunks.length > 0) {
       const ctx = chunks.map((c, i) => `[${i + 1}] ${c.metadata.title}\n${c.content}`).join('\n\n');
       systemPrompt += ` Base your answer on these vault documents:\n\n${ctx}`;

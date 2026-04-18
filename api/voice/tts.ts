@@ -1,7 +1,29 @@
-// ─── API: Text-to-Speech Proxy (fetch-based) ───
+// ─── API: TTS Proxy (Self-Contained) ───
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { checkRateLimit, getRateLimitHeaders } from '../_rateLimit';
+
+// ─── Inlined Rate Limiting ───
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT = 10;
+const RATE_WINDOW_MS = 60 * 1000;
+
+function checkRateLimit(ip: string) {
+  const now = Date.now();
+  const entry = rateLimitMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    return { allowed: true };
+  }
+  if (entry.count >= RATE_LIMIT) return { allowed: false };
+  entry.count++;
+  return { allowed: true };
+}
+
+function getRateLimitHeaders(ip: string) {
+  const entry = rateLimitMap.get(ip);
+  const remaining = entry ? Math.max(0, RATE_LIMIT - entry.count) : RATE_LIMIT;
+  return { 'X-RateLimit-Limit': String(RATE_LIMIT), 'X-RateLimit-Remaining': String(remaining) };
+}
 
 const ELEVENLABS_KEY = process.env.ELEVENLABS_API_KEY;
 const DEFAULT_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'bbGtsRRKUfYO634UxSjz';
@@ -22,9 +44,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
 
   const ip = getClientIP(req);
-  const rateLimit = checkRateLimit(ip);
+  if (!checkRateLimit(ip).allowed) { res.status(429).json({ error: 'Rate limit exceeded' }); return; }
   Object.entries(getRateLimitHeaders(ip)).forEach(([k, v]) => res.setHeader(k, v));
-  if (!rateLimit.allowed) { res.status(429).json({ error: 'Rate limit exceeded' }); return; }
 
   if (!ELEVENLABS_KEY) {
     res.status(500).json({ error: 'TTS service not configured' });

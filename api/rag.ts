@@ -1,7 +1,32 @@
-// ─── API: RAG Bridge (Server-Side, fetch-based) ───
+// ─── API: RAG Bridge (Self-Contained) ───
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { checkRateLimit, getRateLimitHeaders } from './_rateLimit';
+
+// ─── Inlined Rate Limiting ───
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT = 10;
+const RATE_WINDOW_MS = 60 * 1000;
+
+function checkRateLimit(ip: string) {
+  const now = Date.now();
+  const entry = rateLimitMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    return { allowed: true };
+  }
+  if (entry.count >= RATE_LIMIT) return { allowed: false };
+  entry.count++;
+  return { allowed: true };
+}
+
+function getRateLimitHeaders(ip: string) {
+  const entry = rateLimitMap.get(ip);
+  const remaining = entry ? Math.max(0, RATE_LIMIT - entry.count) : RATE_LIMIT;
+  return {
+    'X-RateLimit-Limit': String(RATE_LIMIT),
+    'X-RateLimit-Remaining': String(remaining),
+  };
+}
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const QDRANT_COLLECTION = process.env.QDRANT_COLLECTION || 'obsidian_vault';
@@ -23,45 +48,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
 
   const ip = getClientIP(req);
-  const rateLimit = checkRateLimit(ip);
+  if (!checkRateLimit(ip).allowed) { res.status(429).json({ error: 'Rate limit exceeded' }); return; }
   Object.entries(getRateLimitHeaders(ip)).forEach(([k, v]) => res.setHeader(k, v));
-  if (!rateLimit.allowed) { res.status(429).json({ error: 'Rate limit exceeded' }); return; }
 
   try {
     const { text, topK = 5 } = req.body;
     if (!text) { res.status(400).json({ error: 'Query text required' }); return; }
 
     if (!OPENAI_KEY) {
-      res.status(200).json({ chunks: [], query: text, degraded: true, error: 'Embedding service not configured' });
+      res.status(200).json({ chunks: [], query: text, degraded: true });
       return;
     }
 
-    // Embed query
     const embedRes = await fetch('https://api.openai.com/v1/embeddings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
       body: JSON.stringify({ input: text, model: 'text-embedding-3-small' }),
     });
 
-    if (!embedRes.ok) {
-      res.status(200).json({ chunks: [], query: text, degraded: true });
-      return;
-    }
+    if (!embedRes.ok) { res.status(200).json({ chunks: [], query: text, degraded: true }); return; }
 
     const embedData = await embedRes.json();
     const vector = embedData.data[0].embedding;
 
-    // Query Qdrant
     const qdrantRes = await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}/points/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ vector, limit: topK, with_payload: true, with_vector: false, score_threshold: 0.7 }),
     });
 
-    if (!qdrantRes.ok) {
-      res.status(200).json({ chunks: [], query: text, degraded: true });
-      return;
-    }
+    if (!qdrantRes.ok) { res.status(200).json({ chunks: [], query: text, degraded: true }); return; }
 
     const data = await qdrantRes.json();
     const chunks = data.result.map((point: any) => ({
