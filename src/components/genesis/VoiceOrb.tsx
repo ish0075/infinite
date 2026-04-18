@@ -16,6 +16,8 @@ const VoiceOrbShader = {
   vertexShader: /* glsl */ `
     uniform float uTime;
     uniform float uAudioLow;
+    uniform float uAudioMid;
+    uniform float uAudioHigh;
     varying vec3 vNormal;
     varying vec3 vWorldPosition;
     varying float vDisplacement;
