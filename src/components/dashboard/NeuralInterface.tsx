@@ -1,9 +1,9 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
 import { useDashboard } from './DashboardContext';
-import { queryCognitiveApi, synthesizeTTSApi } from '../../services/api/client';
+import { streamCognitiveQuery, synthesizeTTSApi } from '../../services/api/client';
 
 interface NeuralInterfaceProps {
-  audioDataRef?: React.RefObject<{ bass: number; mid: number; treble: number; volume: number } | null>;
+  audioDataRef?: React.RefObject<{ bass: number; mid: number; treble: number; volume: number; thinking?: number } | null>;
 }
 
 export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) {
@@ -11,21 +11,24 @@ export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) 
   const inputRef = useRef<HTMLInputElement>(null);
   const [glowIntensity, setGlowIntensity] = useState(0);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [streamingText, setStreamingText] = useState('');
+  const accumulatedRef = useRef('');
 
-  // Pulse the glow in sync with audio
+  // Pulse the glow in sync with audio + thinking state
   useEffect(() => {
     let raf: number;
     const update = () => {
       const audio = audioDataRef?.current;
-      const intensity = audio ? audio.bass * 0.6 + audio.mid * 0.3 + audio.treble * 0.1 : 0;
-      setGlowIntensity(intensity);
+      const baseIntensity = audio ? audio.bass * 0.6 + audio.mid * 0.3 + audio.treble * 0.1 : 0;
+      const thinkBoost = audio?.thinking ? audio.thinking * 0.5 : 0;
+      setGlowIntensity(Math.min(1, baseIntensity + thinkBoost));
       raf = requestAnimationFrame(update);
     };
     raf = requestAnimationFrame(update);
     return () => cancelAnimationFrame(raf);
   }, [audioDataRef]);
 
-  // ─── Secure Intelligence: Server-side RAG + LLM ───
+  // ─── Secure Intelligence: Streaming RAG + LLM ───
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
@@ -33,41 +36,72 @@ export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) 
 
       const userQuery = query.text.trim();
       setProcessing(true);
+      setResponse('');
+      setStreamingText('');
+      accumulatedRef.current = '';
+
+      // Set thinking state for the orb
+      if (audioDataRef?.current) audioDataRef.current.thinking = 1;
 
       try {
-        // Single API call: RAG + LLM combined on the server
-        const result = await queryCognitiveApi({ text: userQuery });
+        await streamCognitiveQuery(
+          { text: userQuery },
+          {
+            onToken: (token: string) => {
+              accumulatedRef.current += token;
+              setStreamingText(accumulatedRef.current);
+              // Pulse the orb in rhythm with token arrival
+              if (audioDataRef?.current) {
+                audioDataRef.current.thinking = 0.7 + Math.random() * 0.3;
+              }
+            },
+            onThinking: (_message: string) => {
+              // Soft pulse during RAG retrieval
+              if (audioDataRef?.current) audioDataRef.current.thinking = 0.4;
+            },
+            onError: (message: string) => {
+              setResponse(`⚠️ ${message}`);
+              setStreamingText('');
+            },
+            onDone: (_metadata: any) => {
+              setResponse(accumulatedRef.current);
+              setStreamingText('');
 
-        // Display response
-        setResponse(result.text);
+              // Clear thinking state
+              if (audioDataRef?.current) audioDataRef.current.thinking = 0;
 
-        // Optional TTS via secure proxy
-        if (!isSpeaking) {
-          setIsSpeaking(true);
-          try {
-            const audioData = await synthesizeTTSApi(result.text);
-            const blob = new Blob([audioData], { type: 'audio/mpeg' });
-            const url = URL.createObjectURL(blob);
-            const audio = new Audio(url);
-            audio.onended = () => {
-              URL.revokeObjectURL(url);
-              setIsSpeaking(false);
-            };
-            await audio.play();
-          } catch (ttsErr) {
-            // TTS failed — silently degrade, text is already displayed
-            console.warn('[TTS]', ttsErr);
-            setIsSpeaking(false);
+              // Optional TTS via secure proxy
+              if (!isSpeaking && accumulatedRef.current) {
+                setIsSpeaking(true);
+                synthesizeTTSApi(accumulatedRef.current)
+                  .then((audioData) => {
+                    const blob = new Blob([audioData], { type: 'audio/mpeg' });
+                    const url = URL.createObjectURL(blob);
+                    const audio = new Audio(url);
+                    audio.onended = () => {
+                      URL.revokeObjectURL(url);
+                      setIsSpeaking(false);
+                    };
+                    return audio.play();
+                  })
+                  .catch((ttsErr) => {
+                    console.warn('[TTS]', ttsErr);
+                    setIsSpeaking(false);
+                  });
+              }
+            },
           }
-        }
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : 'The Singularity encountered a disturbance.';
         setResponse(`⚠️ ${message}`);
+        setStreamingText('');
+        if (audioDataRef?.current) audioDataRef.current.thinking = 0;
       } finally {
         setProcessing(false);
       }
     },
-    [query.text, query.isProcessing, isSpeaking, setProcessing, setResponse]
+    [query.text, query.isProcessing, isSpeaking, setProcessing, setResponse, audioDataRef]
   );
 
   return (
@@ -166,7 +200,7 @@ export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) 
         {/* Status indicator */}
         {query.isProcessing && (
           <span style={{ fontSize: '9px', color: '#FFD700', letterSpacing: '0.2em', whiteSpace: 'nowrap' }}>
-            THINKING...
+            {streamingText ? 'GENERATING...' : 'THINKING...'}
           </span>
         )}
 
@@ -213,8 +247,8 @@ export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) 
         </button>
       </form>
 
-      {/* Response bubble */}
-      {query.response && (
+      {/* Response bubble — shows streaming text live, then final response */}
+      {(streamingText || query.response) && (
         <div
           style={{
             marginTop: '0.75rem',
@@ -223,7 +257,7 @@ export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) 
             backdropFilter: 'blur(20px)',
             WebkitBackdropFilter: 'blur(20px)',
             borderRadius: '12px',
-            border: '1px solid rgba(0, 255, 255, 0.1)',
+            border: `1px solid rgba(0, 255, 255, ${streamingText ? 0.25 : 0.1})`,
             color: 'rgba(255, 255, 255, 0.85)',
             fontFamily: 'monospace',
             fontSize: '12px',
@@ -234,7 +268,20 @@ export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) 
             overflowY: 'auto',
           }}
         >
-          {query.response}
+          {streamingText || query.response}
+          {streamingText && (
+            <span
+              style={{
+                display: 'inline-block',
+                width: '6px',
+                height: '14px',
+                background: '#00FFFF',
+                marginLeft: '2px',
+                animation: 'blink 0.7s step-end infinite',
+                verticalAlign: 'middle',
+              }}
+            />
+          )}
         </div>
       )}
 
@@ -245,6 +292,9 @@ export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) 
         @keyframes fadeInUp {
           from { opacity: 0; transform: translateY(8px); }
           to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes blink {
+          50% { opacity: 0; }
         }
       `}</style>
     </div>

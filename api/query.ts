@@ -1,4 +1,6 @@
-// ─── API: Combined Query (RAG + LLM, Self-Contained) ───
+// ─── API: Combined Query with SSE Streaming (Self-Contained) ───
+// Streams LLM tokens directly to the client via Server-Sent Events.
+// RAG happens first (fast), then the token stream begins.
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
@@ -25,26 +27,6 @@ function getRateLimitHeaders(ip: string) {
   return { 'X-RateLimit-Limit': String(RATE_LIMIT), 'X-RateLimit-Remaining': String(remaining) };
 }
 
-// ─── Inlined Cache ───
-const cache = new Map<string, { value: any; expiresAt: number }>();
-const MAX_CACHE_SIZE = 100;
-const CACHE_TTL_MS = 5 * 60 * 1000;
-
-function getCached<T>(key: string): T | null {
-  const entry = cache.get(key);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) { cache.delete(key); return null; }
-  return entry.value;
-}
-
-function setCached<T>(key: string, value: T, ttlMs: number = CACHE_TTL_MS): void {
-  if (cache.size >= MAX_CACHE_SIZE) {
-    const firstKey = cache.keys().next().value;
-    if (firstKey) cache.delete(firstKey);
-  }
-  cache.set(key, { value, expiresAt: Date.now() + ttlMs });
-}
-
 // ─── Config ───
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const QDRANT_COLLECTION = process.env.QDRANT_COLLECTION || 'obsidian_vault';
@@ -58,118 +40,186 @@ function getClientIP(req: VercelRequest): string {
   return req.socket?.remoteAddress || 'unknown';
 }
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+function sendSSE(res: VercelResponse, data: object) {
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+  // Attempt flush for immediate delivery
+  if (typeof (res as any).flush === 'function') {
+    (res as any).flush();
+  }
+}
+
+// ─── Handler: Synchronous entry, async streaming via IIFE ───
+export default function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (req.method === 'OPTIONS') { res.status(200).end(); return; }
-  if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
 
   const ip = getClientIP(req);
-  if (!checkRateLimit(ip).allowed) { res.status(429).json({ error: 'Rate limit exceeded' }); return; }
+  if (!checkRateLimit(ip).allowed) {
+    res.status(429).json({ error: 'Rate limit exceeded' });
+    return;
+  }
   Object.entries(getRateLimitHeaders(ip)).forEach(([k, v]) => res.setHeader(k, v));
 
-  const startTime = Date.now();
+  // Set SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+  res.status(200);
 
-  try {
-    const { text, provider } = req.body;
-    if (!text) { res.status(400).json({ error: 'Query text required' }); return; }
+  // Fire-and-forget the streaming work
+  (async () => {
+    try {
+      const { text, provider } = req.body;
+      if (!text) {
+        sendSSE(res, { type: 'error', message: 'Query text required' });
+        res.end();
+        return;
+      }
 
-    const cacheKey = `query:${text}`;
-    const cached = getCached(cacheKey);
-    if (cached) { res.status(200).json({ ...cached, cached: true, latencyMs: Date.now() - startTime }); return; }
+      // ─── Step 1: RAG (pre-stream, fast) ───
+      sendSSE(res, { type: 'thinking', message: 'Retrieving knowledge...' });
 
-    // ─── Step 1: RAG ───
-    let chunks: any[] = [];
-    let ragDegraded = false;
+      let chunks: any[] = [];
+      let ragDegraded = false;
 
-    if (OPENAI_KEY) {
-      try {
-        const embedRes = await fetch('https://api.openai.com/v1/embeddings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
-          body: JSON.stringify({ input: text, model: 'text-embedding-3-small' }),
-        });
-
-        if (embedRes.ok) {
-          const embedData = await embedRes.json();
-          const vector = embedData.data[0].embedding;
-          const qdrantRes = await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}/points/search`, {
+      if (OPENAI_KEY) {
+        try {
+          const embedRes = await fetch('https://api.openai.com/v1/embeddings', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ vector, limit: 5, with_payload: true, with_vector: false, score_threshold: 0.7 }),
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
+            body: JSON.stringify({ input: text, model: 'text-embedding-3-small' }),
           });
-          if (qdrantRes.ok) {
-            const data = await qdrantRes.json();
-            chunks = data.result.map((point: any) => ({
-              id: point.id,
-              content: point.payload?.content || '',
-              metadata: { filePath: point.payload?.file_path || '', title: point.payload?.title || 'Untitled', tags: point.payload?.tags || [] },
-              score: point.score,
-            }));
+
+          if (embedRes.ok) {
+            const embedData = await embedRes.json();
+            const vector = embedData.data[0].embedding;
+            const qdrantRes = await fetch(
+              `${QDRANT_URL}/collections/${QDRANT_COLLECTION}/points/search`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ vector, limit: 5, with_payload: true, with_vector: false, score_threshold: 0.7 }),
+              }
+            );
+            if (qdrantRes.ok) {
+              const data = await qdrantRes.json();
+              chunks = data.result.map((point: any) => ({
+                id: point.id,
+                content: point.payload?.content || '',
+                metadata: { filePath: point.payload?.file_path || '', title: point.payload?.title || 'Untitled', tags: point.payload?.tags || [] },
+                score: point.score,
+              }));
+            } else { ragDegraded = true; }
           } else { ragDegraded = true; }
-        } else { ragDegraded = true; }
-      } catch { ragDegraded = true; }
-    } else { ragDegraded = true; }
+        } catch { ragDegraded = true; }
+      } else { ragDegraded = true; }
 
-    // ─── Step 2: Build prompt ───
-    let systemPrompt = 'You are I.N.F.I.N.I.T.E., the intelligence core of the BigDataClaw ecosystem. You assist with real estate data, client profiles, legal precedents, and deal analysis.';
-    if (chunks.length > 0) {
-      const ctx = chunks.map((c, i) => `[${i + 1}] ${c.metadata.title}\n${c.content}`).join('\n\n');
-      systemPrompt += ` Base your answer on these vault documents:\n\n${ctx}`;
-    } else if (ragDegraded) {
-      systemPrompt += ' The vault is currently offline. Answer from general knowledge, noting the limitation.';
+      // ─── Step 2: Build prompt ───
+      let systemPrompt = 'You are I.N.F.I.N.I.T.E., the intelligence core of the BigDataClaw ecosystem. You assist with real estate data, client profiles, legal precedents, and deal analysis.';
+      if (chunks.length > 0) {
+        const ctx = chunks.map((c, i) => `[${i + 1}] ${c.metadata.title}\n${c.content}`).join('\n\n');
+        systemPrompt += ` Base your answer on these vault documents:\n\n${ctx}`;
+      } else if (ragDegraded) {
+        systemPrompt += ' The vault is currently offline. Answer from general knowledge, noting the limitation.';
+      }
+
+      // ─── Step 3: Stream LLM ───
+      const resolvedProvider = provider || 'openai';
+      const apiKey = resolvedProvider === 'groq' ? GROQ_KEY : OPENAI_KEY;
+      const baseURL = resolvedProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
+      const model = resolvedProvider === 'groq' ? 'llama-3.1-8b-instant' : 'gpt-4o-mini';
+
+      if (!apiKey) {
+        sendSSE(res, { type: 'error', message: 'No LLM provider configured' });
+        res.end();
+        return;
+      }
+
+      const llmRes = await fetch(`${baseURL}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: text },
+          ],
+          temperature: 0.7,
+          max_tokens: 1024,
+          stream: true,
+        }),
+      });
+
+      if (!llmRes.ok) {
+        sendSSE(res, { type: 'error', message: `LLM error: ${llmRes.status}` });
+        res.end();
+        return;
+      }
+
+      // Read the stream
+      const reader = llmRes.body?.getReader();
+      if (!reader) {
+        sendSSE(res, { type: 'error', message: 'No response stream' });
+        res.end();
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+
+          const data = trimmed.slice(6);
+          if (data === '[DONE]') continue;
+
+          try {
+            const parsed = JSON.parse(data);
+            const token = parsed.choices?.[0]?.delta?.content || '';
+            if (token) {
+              sendSSE(res, { type: 'token', content: token });
+            }
+          } catch {
+            // Ignore malformed JSON lines
+          }
+        }
+      }
+
+      // ─── Step 4: Done ───
+      sendSSE(res, { type: 'done', metadata: { provider: resolvedProvider, model, ragDegraded, contextChunks: chunks.length } });
+      res.end();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      console.error('[API /query]', message);
+      try {
+        sendSSE(res, { type: 'error', message });
+        res.end();
+      } catch {
+        // Response may already be closed
+      }
     }
+  })();
 
-    // ─── Step 3: LLM ───
-    const resolvedProvider = provider || 'openai';
-    const apiKey = resolvedProvider === 'groq' ? GROQ_KEY : OPENAI_KEY;
-    const baseURL = resolvedProvider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
-    const model = resolvedProvider === 'groq' ? 'llama-3.1-8b-instant' : 'gpt-4o-mini';
-
-    if (!apiKey) {
-      res.status(500).json({ error: 'No LLM provider configured' });
-      return;
-    }
-
-    const llmRes = await fetch(`${baseURL}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: text },
-        ],
-        temperature: 0.7,
-        max_tokens: 1024,
-      }),
-    });
-
-    if (!llmRes.ok) throw new Error(`LLM error: ${llmRes.status}`);
-
-    const data = await llmRes.json();
-    const result = {
-      text: data.choices[0]?.message?.content || '',
-      provider: resolvedProvider,
-      model,
-      ragDegraded,
-      contextChunks: chunks.length,
-      latencyMs: Date.now() - startTime,
-    };
-
-    setCached(cacheKey, result);
-    res.status(200).json(result);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    console.error('[API /query]', message);
-    res.status(500).json({
-      error: 'Cognitive systems recalibrating.',
-      detail: message,
-      degraded: true,
-      text: 'I apologize, but I am temporarily unable to process your query. My systems are recalibrating. Please try again shortly.',
-      latencyMs: Date.now() - startTime,
-    });
-  }
+  // Return void — Vercel won't wait for the async IIFE
 }

@@ -180,6 +180,7 @@ export default function SingularityLayer({ scrollProgress, audioDataRef, onConve
 
     const p = scrollProgress.current.progress;
     const t = clock.getElapsedTime();
+    const ingestionPulse = audioDataRef.current?.ingestionPulse ?? 0;
 
     // ═══════════════════════════════════════════════
     // THE CRYSTALLIZATION TIMING (The Final Handshake)
@@ -206,12 +207,13 @@ export default function SingularityLayer({ scrollProgress, audioDataRef, onConve
       const particle = particles[i];
       const isSemantic = semanticIndices.includes(i);
 
-      // ─── Turbulence from the dying explosion ───
+      // ─── Turbulence from the dying explosion + ingestion pulse ───
       const noise = Math.sin(t * 2.5 + particle.id) * Math.cos(t * 1.8 + particle.id * 0.1);
+      const ingestionTurbulence = ingestionPulse * (isSemantic ? 2.5 : 5);
       const turbulence = new THREE.Vector3(
-        noise * explodePhase * (isSemantic ? 1.5 : 3),
-        Math.cos(t * 1.5 + particle.id * 0.2) * explodePhase * (isSemantic ? 1.5 : 3),
-        Math.sin(t * 1.0 + particle.id * 0.3) * explodePhase * (isSemantic ? 1.5 : 3)
+        (noise * explodePhase + ingestionTurbulence * Math.sin(t * 8 + particle.id)) * (isSemantic ? 1.5 : 3),
+        (Math.cos(t * 1.5 + particle.id * 0.2) * explodePhase + ingestionTurbulence * Math.cos(t * 6 + particle.id)) * (isSemantic ? 1.5 : 3),
+        (Math.sin(t * 1.0 + particle.id * 0.3) * explodePhase + ingestionTurbulence * Math.sin(t * 7 + particle.id)) * (isSemantic ? 1.5 : 3)
       );
 
       // ─── Breathing animation when fully converged ───
@@ -242,10 +244,15 @@ export default function SingularityLayer({ scrollProgress, audioDataRef, onConve
         // White-hot core during settling
         baseColor.lerp(new THREE.Color(1, 0.95, 0.85), explodePhase * 0.75);
       }
-      // Pulse brighter when converged
+      // Pulse brighter when converged + ingestion surge
       if (convergePhase > 0.5) {
         const pulse = Math.sin(t * 2 + particle.id) * 0.1 * convergePhase;
         baseColor.multiplyScalar(1.0 + pulse);
+      }
+      if (ingestionPulse > 0) {
+        // Gold-cyan flash during ingestion
+        baseColor.lerp(new THREE.Color(0.0, 1.0, 0.8), ingestionPulse * 0.6);
+        baseColor.multiplyScalar(1.0 + ingestionPulse * 0.5);
       }
       colAttr.setXYZ(i, baseColor.r, baseColor.g, baseColor.b);
 

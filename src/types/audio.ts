@@ -15,6 +15,10 @@ export interface AudioData {
   volume: number;
   /** Whether the analyzer is actively capturing */
   isActive: boolean;
+  /** "Thinking" pulse intensity (0-1) — driven by LLM token stream */
+  thinking: number;
+  /** Ingestion pulse intensity (0-1) — driven by file upload processing */
+  ingestionPulse: number;
 }
 
 export interface AudioAnalyzerState {

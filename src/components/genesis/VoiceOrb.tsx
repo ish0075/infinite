@@ -10,6 +10,7 @@ const VoiceOrbShader = {
     uAudioLow: { value: 0.0 },
     uAudioMid: { value: 0.0 },
     uAudioHigh: { value: 0.0 },
+    uThinking: { value: 0.0 },
     uColorCore: { value: new THREE.Color('#FFD700') }, // Gold
     uColorRim: { value: new THREE.Color('#00FFFF') },  // Electric Blue
   },
@@ -18,6 +19,7 @@ const VoiceOrbShader = {
     uniform float uAudioLow;
     uniform float uAudioMid;
     uniform float uAudioHigh;
+    uniform float uThinking;
     varying vec3 vNormal;
     varying vec3 vWorldPosition;
     varying float vDisplacement;
@@ -81,8 +83,11 @@ const VoiceOrbShader = {
       // Bass = large organic swell, Mid = surface ripples, High = fine shimmer
       float audioPulse = uAudioLow * 0.18 + uAudioMid * 0.08 + uAudioHigh * 0.04;
 
-      vDisplacement = pulse + audioPulse;
-      vec3 newPosition = position + normal * (pulse + audioPulse);
+      // Thinking state adds a faster, deeper pulse
+      float thinkPulse = uThinking * sin(uTime * 4.0) * 0.06;
+
+      vDisplacement = pulse + audioPulse + thinkPulse;
+      vec3 newPosition = position + normal * (pulse + audioPulse + thinkPulse);
 
       vec4 worldPosition = modelMatrix * vec4(newPosition, 1.0);
       vWorldPosition = worldPosition.xyz;
@@ -97,6 +102,7 @@ const VoiceOrbShader = {
     uniform float uAudioLow;
     uniform float uAudioMid;
     uniform float uAudioHigh;
+    uniform float uThinking;
     varying vec3 vNormal;
     varying vec3 vWorldPosition;
     varying float vDisplacement;
@@ -114,13 +120,17 @@ const VoiceOrbShader = {
       color += uColorRim * uAudioMid * 0.4;
       color += vec3(1.0, 1.0, 1.0) * uAudioHigh * 0.3;
 
-      // Shimmer on the surface — faster when audio is active
-      float shimmerSpeed = 3.0 + uAudioLow * 5.0;
+      // Thinking state: bright cyan surge across the rim
+      color += vec3(0.0, 1.0, 1.0) * uThinking * fresnel * 0.8;
+      color += uColorCore * uThinking * 0.3;
+
+      // Shimmer on the surface — faster when audio or thinking is active
+      float shimmerSpeed = 3.0 + uAudioLow * 5.0 + uThinking * 8.0;
       float shimmer = sin(uTime * shimmerSpeed + vWorldPosition.x * 5.0) * 0.5 + 0.5;
       color += uColorRim * shimmer * fresnel * 0.3;
 
       // Alpha: strong fresnel glow + soft core presence
-      float alpha = fresnel * 0.85 + 0.15 + uAudioLow * 0.25;
+      float alpha = fresnel * 0.85 + 0.15 + uAudioLow * 0.25 + uThinking * 0.2;
       alpha = clamp(alpha, 0.0, 1.0);
 
       gl_FragColor = vec4(color, alpha);
@@ -157,9 +167,10 @@ export function VoiceOrb({ audioDataRef, scrollProgress }: VoiceOrbProps) {
     const bass = audio?.bass ?? 0;
     const mid = audio?.mid ?? 0;
     const high = audio?.treble ?? 0;
+    const thinking = audio?.thinking ?? 0;
 
-    // Scale: base + bass swell
-    const scaleMultiplier = 1.0 + bass * 0.35 + mid * 0.15;
+    // Scale: base + bass swell + thinking pulse
+    const scaleMultiplier = 1.0 + bass * 0.35 + mid * 0.15 + thinking * 0.2;
     const finalScale = baseScaleRef.current * scaleMultiplier;
     meshRef.current.scale.setScalar(Math.max(0.001, finalScale));
 
@@ -168,6 +179,7 @@ export function VoiceOrb({ audioDataRef, scrollProgress }: VoiceOrbProps) {
     materialRef.current.uniforms.uAudioLow.value = bass;
     materialRef.current.uniforms.uAudioMid.value = mid;
     materialRef.current.uniforms.uAudioHigh.value = high;
+    materialRef.current.uniforms.uThinking.value = thinking;
 
     // ─── Eternal rotation ───
     meshRef.current.rotation.y += 0.002 + bass * 0.008;

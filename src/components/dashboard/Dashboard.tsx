@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import SystemTelemetry from './SystemTelemetry';
 import NeuralInterface from './NeuralInterface';
 import KnowledgeHUD from './KnowledgeHUD';
+import IngestionZone from './IngestionZone';
 import { useDashboard } from './DashboardContext';
 import type { AudioData } from '../../types/audio';
 
@@ -31,6 +32,7 @@ export default function Dashboard({ audioDataRef }: DashboardProps) {
       <SystemTelemetry />
       <KnowledgeHUD />
       <NeuralInterface audioDataRef={audioDataRef} />
+      <IngestionZone audioDataRef={audioDataRef} />
     </>
   );
 }

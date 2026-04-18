@@ -6,3 +6,4 @@ dist/
 .env
 .env.local
 .vercel
+tests/audit-report.json

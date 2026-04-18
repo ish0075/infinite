@@ -1,0 +1,44 @@
+[
+  {
+    "id": "gt-001",
+    "category": "zoning",
+    "question": "What is the zoning classification for the Thorold Crown Land parcel?",
+    "expectedContext": "The Thorold Crown Land parcel is classified as EP (Environmental Protection) zoning under the Niagara Region Official Plan. This designation restricts development to conservation and passive recreation uses only. Any change to the zoning would require an amendment to the Official Plan and approval from the Regional Municipality of Niagara.",
+    "expectedAnswer": "The Thorold Crown Land parcel is zoned EP (Environmental Protection), which limits use to conservation and passive recreation. Changing this would require a Regional Official Plan amendment."
+  },
+  {
+    "id": "gt-002",
+    "category": "client-profile",
+    "question": "What are Client A's primary investment criteria for commercial real estate?",
+    "expectedContext": "Client A (Mississauga Portfolio Buyer) focuses on Class B industrial assets in the 905 corridor. Minimum deal size: $5M. Target cap rate: 6.5%–7.5%. Preferred tenants: logistics and last-mile delivery. Avoids hospitality and retail. Requires minimum 5-year WALT.",
+    "expectedAnswer": "Client A seeks Class B industrial assets in the 905 corridor, $5M+, cap rates 6.5%–7.5%, with logistics tenants and minimum 5-year WALT. Excludes hospitality and retail."
+  },
+  {
+    "id": "gt-003",
+    "category": "legal-precedent",
+    "question": "What was the outcome of the Pelham Church Street rezoning appeal?",
+    "expectedContext": "The OLT (Ontario Land Tribunal) upheld the Town of Pelham's refusal to rezone 325 Church St from Residential to Mixed-Use. The Tribunal found the applicant failed to demonstrate adequate servicing capacity for the proposed density and that the rezoning would conflict with the Town's heritage conservation district objectives.",
+    "expectedAnswer": "The OLT upheld Pelham's refusal. The applicant failed to prove adequate servicing capacity, and the rezoning conflicted with heritage conservation district objectives."
+  },
+  {
+    "id": "gt-004",
+    "category": "market-data",
+    "question": "What is the average price per acre for agricultural land in Niagara Region as of Q4 2024?",
+    "expectedContext": "Niagara Region Agricultural Land Values Q4 2024: Average price per acre for viable farmland (Class 1–3 soils) ranged from $28,000 to $42,000 depending on proximity to urban boundaries and servicing. Land within 5km of urban settlement areas commanded premiums of 15–25% above the regional average.",
+    "expectedAnswer": "Agricultural land in Niagara averaged $28,000–$42,000 per acre in Q4 2024, with 15–25% premiums within 5km of urban boundaries."
+  },
+  {
+    "id": "gt-005",
+    "category": "deal-analysis",
+    "question": "What are the key risks identified in the Stayner 112-acre development proposal?",
+    "expectedContext": "Stayner 112-Acre Risk Assessment: (1) Servicing: No municipal water/sewer at site boundary; private well and septic required. (2) Access: Single ingress/egress via County Rd 91; no secondary emergency access. (3) Environmental: Phase I ESA identified historic fill material requiring further investigation. (4) Zoning: Currently Rural/Agricultural; rezoning to Rural Residential would require Simcoe County approval. (5) Market: Absorption rate for similar product in Clearview Township is 8–12 units/year.",
+    "expectedAnswer": "Key risks include lack of municipal servicing (well/septic required), single access point, historic fill requiring investigation, need for County rezoning, and slow absorption of 8–12 units/year."
+  },
+  {
+    "id": "gt-006",
+    "category": "lender-profile",
+    "question": "Which lenders in the database specialize in land loans for residential development?",
+    "expectedContext": "Land Lender Specializations — Residential Development: (1) First National: up to 65% LTV, minimum loan $2M, prefers serviced land within GTA. (2) RBC Real Estate Finance: 60% LTV, strong on pre-zoned residential land, requires presale commitment. (3) Timbercreek: 70% LTV for infill sites, higher rates (prime + 4–6%), flexible on zoning status. (4) Foremost Financial: private lender, 50% LTV, bridge financing for land acquisition, term 6–18 months.",
+    "expectedAnswer": "Specialized land lenders include First National (65% LTV, $2M+, GTA), RBC REF (60% LTV, pre-zoned, presales required), Timbercreek (70% LTV infill, prime + 4–6%), and Foremost Financial (50% LTV, bridge, 6–18 months)."
+  }
+]

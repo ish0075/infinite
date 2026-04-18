@@ -34,6 +34,8 @@ export function useAudioAnalyzer() {
     treble: 0,
     volume: 0,
     isActive: false,
+    thinking: 0,
+    ingestionPulse: 0,
   });
 
   // ─── Compute energy in a bin range (0-1 normalized) ───
@@ -176,6 +178,8 @@ export function useAudioAnalyzer() {
     audioDataRef.current.mid = 0;
     audioDataRef.current.treble = 0;
     audioDataRef.current.volume = 0;
+    audioDataRef.current.thinking = 0;
+    audioDataRef.current.ingestionPulse = 0;
 
     setIsActive(false);
   }, []);
