@@ -1,8 +1,8 @@
 // ─── API: Combined Query (RAG + LLM, fetch-based) ───
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { checkRateLimit, getRateLimitHeaders } from './utils/rateLimit';
-import { getCached, setCached } from './utils/cache';
+import { checkRateLimit, getRateLimitHeaders } from './_rateLimit';
+import { getCached, setCached } from './_cache';
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const QDRANT_COLLECTION = process.env.QDRANT_COLLECTION || 'obsidian_vault';

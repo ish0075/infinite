@@ -1,8 +1,8 @@
 // ─── API: LLM Router (Server-Side, fetch-based) ───
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { checkRateLimit, getRateLimitHeaders } from './utils/rateLimit';
-import { getCached, setCached } from './utils/cache';
+import { checkRateLimit, getRateLimitHeaders } from './_rateLimit';
+import { getCached, setCached } from './_cache';
 
 const MODELS: Record<string, string> = {
   openai: 'gpt-4o-mini',

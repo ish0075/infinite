@@ -1,7 +1,7 @@
 // ─── API: RAG Bridge (Server-Side, fetch-based) ───
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { checkRateLimit, getRateLimitHeaders } from './utils/rateLimit';
+import { checkRateLimit, getRateLimitHeaders } from './_rateLimit';
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const QDRANT_COLLECTION = process.env.QDRANT_COLLECTION || 'obsidian_vault';

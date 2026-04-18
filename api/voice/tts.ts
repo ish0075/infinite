@@ -1,7 +1,7 @@
 // ─── API: Text-to-Speech Proxy (fetch-based) ───
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { checkRateLimit, getRateLimitHeaders } from '../utils/rateLimit';
+import { checkRateLimit, getRateLimitHeaders } from '../_rateLimit';
 
 const ELEVENLABS_KEY = process.env.ELEVENLABS_API_KEY;
 const DEFAULT_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'bbGtsRRKUfYO634UxSjz';
