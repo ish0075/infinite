@@ -1,9 +1,6 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
 import { useDashboard } from './DashboardContext';
-import { queryLLM } from '../../services/llm';
-import { queryRAG, buildAugmentedPrompt } from '../../services/rag';
-import { speak } from '../../services/voice';
-import type { LLMMessage } from '../../services/llm';
+import { queryCognitiveApi, synthesizeTTSApi } from '../../services/api/client';
 
 interface NeuralInterfaceProps {
   audioDataRef?: React.RefObject<{ bass: number; mid: number; treble: number; volume: number } | null>;
@@ -28,7 +25,7 @@ export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) 
     return () => cancelAnimationFrame(raf);
   }, [audioDataRef]);
 
-  // ─── Real Intelligence: LLM + RAG ───
+  // ─── Secure Intelligence: Server-side RAG + LLM ───
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
@@ -38,27 +35,30 @@ export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) 
       setProcessing(true);
 
       try {
-        // 1. Retrieve relevant context from vault
-        const ragResult = await queryRAG({ text: userQuery, topK: 5 });
+        // Single API call: RAG + LLM combined on the server
+        const result = await queryCognitiveApi({ text: userQuery });
 
-        // 2. Build augmented prompt with RAG context
-        const augmented = buildAugmentedPrompt(userQuery, ragResult);
+        // Display response
+        setResponse(result.text);
 
-        // 3. Route to LLM with grounded context
-        const messages: LLMMessage[] = [
-          { role: 'system', content: augmented.systemPrompt },
-          { role: 'user', content: augmented.userPrompt },
-        ];
-
-        const llmResponse = await queryLLM({ messages, temperature: 0.7 });
-
-        // 4. Display response
-        setResponse(llmResponse.text);
-
-        // 5. Optional: Speak the response
+        // Optional TTS via secure proxy
         if (!isSpeaking) {
           setIsSpeaking(true);
-          await speak(llmResponse.text, () => setIsSpeaking(false));
+          try {
+            const audioData = await synthesizeTTSApi(result.text);
+            const blob = new Blob([audioData], { type: 'audio/mpeg' });
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audio.onended = () => {
+              URL.revokeObjectURL(url);
+              setIsSpeaking(false);
+            };
+            await audio.play();
+          } catch (ttsErr) {
+            // TTS failed — silently degrade, text is already displayed
+            console.warn('[TTS]', ttsErr);
+            setIsSpeaking(false);
+          }
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : 'The Singularity encountered a disturbance.';
