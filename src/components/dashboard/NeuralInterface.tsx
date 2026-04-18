@@ -1,14 +1,19 @@
-import { useRef, useState, useEffect } from 'react';
+import { useRef, useState, useEffect, useCallback } from 'react';
 import { useDashboard } from './DashboardContext';
+import { queryLLM } from '../../services/llm';
+import { queryRAG, buildAugmentedPrompt } from '../../services/rag';
+import { speak } from '../../services/voice';
+import type { LLMMessage } from '../../services/llm';
 
 interface NeuralInterfaceProps {
   audioDataRef?: React.RefObject<{ bass: number; mid: number; treble: number; volume: number } | null>;
 }
 
 export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) {
-  const { query, setQueryText, submitQuery } = useDashboard();
+  const { query, setQueryText, setProcessing, setResponse } = useDashboard();
   const inputRef = useRef<HTMLInputElement>(null);
   const [glowIntensity, setGlowIntensity] = useState(0);
+  const [isSpeaking, setIsSpeaking] = useState(false);
 
   // Pulse the glow in sync with audio
   useEffect(() => {
@@ -23,10 +28,47 @@ export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) 
     return () => cancelAnimationFrame(raf);
   }, [audioDataRef]);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    submitQuery();
-  };
+  // ─── Real Intelligence: LLM + RAG ───
+  const handleSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!query.text.trim() || query.isProcessing) return;
+
+      const userQuery = query.text.trim();
+      setProcessing(true);
+
+      try {
+        // 1. Retrieve relevant context from vault
+        const ragResult = await queryRAG({ text: userQuery, topK: 5 });
+
+        // 2. Build augmented prompt with RAG context
+        const augmented = buildAugmentedPrompt(userQuery, ragResult);
+
+        // 3. Route to LLM with grounded context
+        const messages: LLMMessage[] = [
+          { role: 'system', content: augmented.systemPrompt },
+          { role: 'user', content: augmented.userPrompt },
+        ];
+
+        const llmResponse = await queryLLM({ messages, temperature: 0.7 });
+
+        // 4. Display response
+        setResponse(llmResponse.text);
+
+        // 5. Optional: Speak the response
+        if (!isSpeaking) {
+          setIsSpeaking(true);
+          await speak(llmResponse.text, () => setIsSpeaking(false));
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'The Singularity encountered a disturbance.';
+        setResponse(`⚠️ ${message}`);
+      } finally {
+        setProcessing(false);
+      }
+    },
+    [query.text, query.isProcessing, isSpeaking, setProcessing, setResponse]
+  );
 
   return (
     <div
@@ -36,7 +78,7 @@ export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) 
         left: '50%',
         transform: 'translateX(-50%)',
         zIndex: 50,
-        width: 'min(600px, 90vw)',
+        width: 'min(640px, 92vw)',
         pointerEvents: 'auto',
       }}
     >
@@ -106,6 +148,7 @@ export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) 
           value={query.text}
           onChange={(e) => setQueryText(e.target.value)}
           placeholder="Command the Singularity..."
+          disabled={query.isProcessing}
           style={{
             flex: 1,
             background: 'transparent',
@@ -116,8 +159,16 @@ export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) 
             fontSize: '13px',
             letterSpacing: '0.05em',
             padding: '0.25rem 0',
+            opacity: query.isProcessing ? 0.5 : 1,
           }}
         />
+
+        {/* Status indicator */}
+        {query.isProcessing && (
+          <span style={{ fontSize: '9px', color: '#FFD700', letterSpacing: '0.2em', whiteSpace: 'nowrap' }}>
+            THINKING...
+          </span>
+        )}
 
         {/* Submit button */}
         <button
@@ -179,6 +230,8 @@ export default function NeuralInterface({ audioDataRef }: NeuralInterfaceProps) 
             lineHeight: 1.6,
             letterSpacing: '0.02em',
             animation: 'fadeInUp 0.3s ease',
+            maxHeight: '200px',
+            overflowY: 'auto',
           }}
         >
           {query.response}
