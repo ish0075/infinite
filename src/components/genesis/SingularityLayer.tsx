@@ -50,6 +50,7 @@ interface SingularityLayerProps {
   scrollProgress: React.MutableRefObject<{ progress: number; velocity: number }>;
   audioDataRef: React.RefObject<AudioData | null>;
   onConverged?: () => void;
+  onNodeClick?: (nodeId: string) => void;
 }
 
 // ─── Utilities ───
@@ -59,7 +60,7 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
 }
 
 // ─── Component: SingularityLayer ───
-export default function SingularityLayer({ scrollProgress, audioDataRef, onConverged }: SingularityLayerProps) {
+export default function SingularityLayer({ scrollProgress, audioDataRef, onConverged, onNodeClick }: SingularityLayerProps) {
   const pointsRef = useRef<THREE.Points>(null);
   const linesRef = useRef<THREE.LineSegments>(null);
   const materialRef = useRef<THREE.ShaderMaterial>(null);
@@ -318,7 +319,27 @@ export default function SingularityLayer({ scrollProgress, audioDataRef, onConve
       <VoiceOrb audioDataRef={audioDataRef} scrollProgress={scrollProgress} />
 
       {/* ═══ Semantic Nodes + Data Dust Particles ═══ */}
-      <points ref={pointsRef}>
+      <points
+        ref={pointsRef}
+        onClick={(e) => {
+          if (!onNodeClick) return;
+          e.stopPropagation();
+          // Find nearest semantic node to click point
+          const clickPoint = e.point;
+          let nearestId: string | null = null;
+          let nearestDist = Infinity;
+          semanticIndices.forEach((idx) => {
+            const particle = particles[idx];
+            const dist = clickPoint.distanceTo(particle.position);
+            if (dist < nearestDist && dist < 3.0) {
+              nearestDist = dist;
+              const node = SEMANTIC_NODES[semanticIndices.indexOf(idx)];
+              if (node) nearestId = node.id;
+            }
+          });
+          if (nearestId) onNodeClick(nearestId);
+        }}
+      >
         <bufferGeometry>
           <bufferAttribute attach="attributes-position" count={PARTICLE_COUNT} array={particlePositions} itemSize={3} />
           <bufferAttribute attach="attributes-color" count={PARTICLE_COUNT} array={particleColors} itemSize={3} />
